@@ -65,6 +65,7 @@ FORCE_CXX11_ABI = os.getenv("FLASH_ATTENTION_FORCE_CXX11_ABI", "FALSE") == "TRUE
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", "FALSE") == "TRUE"
 SKIP_CK_BUILD = os.getenv("FLASH_ATTENTION_SKIP_CK_BUILD", "TRUE") == "TRUE" if USE_TRITON_ROCM else False
 NVCC_THREADS = os.getenv("NVCC_THREADS") or "4"
+CK_GIT_REF = os.getenv("FLASH_ATTENTION_CK_GIT_REF", "").strip()
 
 @functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
@@ -195,9 +196,15 @@ def rename_cpp_to_cu(cpp_files):
         shutil.copy(entry, os.path.splitext(entry)[0] + ".cu")
 
 
+def maybe_checkout_ck_git_ref() -> None:
+    if not CK_GIT_REF:
+        return
+    subprocess.run(["git", "-C", "csrc/composable_kernel", "checkout", CK_GIT_REF], check=True)
+
+
 def validate_and_update_archs(archs):
     # List of allowed architectures
-    allowed_archs = ["native", "gfx90a", "gfx950", "gfx942"]
+    allowed_archs = ["native", "gfx90a", "gfx950", "gfx942", "gfx1100", "gfx1102", "gfx1103", "gfx1200", "gfx1201"]
 
     # Validate if each element in archs is in allowed_archs
     assert all(
@@ -213,6 +220,7 @@ ext_modules = []
 if os.path.isdir(".git"):
     if not SKIP_CK_BUILD:
         subprocess.run(["git", "submodule", "update", "--init", "csrc/composable_kernel"], check=True)
+        maybe_checkout_ck_git_ref()
         subprocess.run(["git", "submodule", "update", "--init", "csrc/cutlass"], check=True)
 else:
     if IS_ROCM:
@@ -376,16 +384,42 @@ elif not SKIP_CUDA_BUILD and IS_ROCM:
     # Skips CK C++ extension compilation if using Triton Backend
     if not SKIP_CK_BUILD:
         ck_dir = "csrc/composable_kernel"
+        archs = os.getenv("GPU_ARCHS", os.getenv("PYTORCH_ROCM_ARCH", "native")).split(";")
+        validate_and_update_archs(archs)
+
+        if archs != ["native"]:
+            codegen_archs = archs
+        else:
+            codegen_archs = [torch.cuda.get_device_properties("cuda").gcnArchName.split(":")[0]]
+
+        def map_to_codegen_target(arch):
+            if arch.startswith("gfx950"):
+                return "gfx950"
+            if arch.startswith("gfx9"):
+                return "gfx9"
+            if arch.startswith("gfx11"):
+                return "gfx11"
+            if arch.startswith("gfx12"):
+                return "gfx12"
+            return None
+
+        ck_codegen_targets = ",".join(
+            sorted({t for t in (map_to_codegen_target(a) for a in codegen_archs) if t is not None})
+        )
+        if not ck_codegen_targets:
+            raise RuntimeError(
+                f"Unable to derive CK codegen targets from archs={codegen_archs}"
+            )
 
         #use codegen get code dispatch
         if not os.path.exists("./build"):
             os.makedirs("build")
 
         optdim = os.getenv("OPT_DIM", "32,64,128,256")
-        subprocess.run([sys.executable, f"{ck_dir}/example/ck_tile/01_fmha/generate.py", "-d", "fwd", "--output_dir", "build", "--receipt", "2", "--optdim", optdim], check=True)
-        subprocess.run([sys.executable, f"{ck_dir}/example/ck_tile/01_fmha/generate.py", "-d", "fwd_appendkv", "--output_dir", "build", "--receipt", "2", "--optdim", optdim], check=True)
-        subprocess.run([sys.executable, f"{ck_dir}/example/ck_tile/01_fmha/generate.py", "-d", "fwd_splitkv", "--output_dir", "build", "--receipt", "2", "--optdim", optdim], check=True)
-        subprocess.run([sys.executable, f"{ck_dir}/example/ck_tile/01_fmha/generate.py", "-d", "bwd", "--output_dir", "build", "--receipt", "2", "--optdim", optdim], check=True)
+        subprocess.run([sys.executable, f"{ck_dir}/example/ck_tile/01_fmha/generate.py", "-d", "fwd", "--targets", ck_codegen_targets, "--output_dir", "build", "--receipt", "2", "--optdim", optdim], check=True)
+        subprocess.run([sys.executable, f"{ck_dir}/example/ck_tile/01_fmha/generate.py", "-d", "fwd_appendkv", "--targets", ck_codegen_targets, "--output_dir", "build", "--receipt", "2", "--optdim", optdim], check=True)
+        subprocess.run([sys.executable, f"{ck_dir}/example/ck_tile/01_fmha/generate.py", "-d", "fwd_splitkv", "--targets", ck_codegen_targets, "--output_dir", "build", "--receipt", "2", "--optdim", optdim], check=True)
+        subprocess.run([sys.executable, f"{ck_dir}/example/ck_tile/01_fmha/generate.py", "-d", "bwd", "--targets", ck_codegen_targets, "--output_dir", "build", "--receipt", "2", "--optdim", optdim], check=True)
 
         # Check, if ATen/CUDAGeneratorImpl.h is found, otherwise use ATen/cuda/CUDAGeneratorImpl.h
         # See https://github.com/pytorch/pytorch/pull/70650
@@ -395,9 +429,6 @@ elif not SKIP_CUDA_BUILD and IS_ROCM:
             generator_flag = ["-DOLD_GENERATOR_PATH"]
 
         check_if_rocm_home_none("flash_attn")
-        archs = os.getenv("GPU_ARCHS", "native").split(";")
-        validate_and_update_archs(archs)
-
         if archs != ['native']:
             cc_flag = [f"--offload-arch={arch}" for arch in archs]
         else:
