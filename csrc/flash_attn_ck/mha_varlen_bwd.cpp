@@ -6,6 +6,94 @@
 
 #include "fmha_bwd.hpp"
 #include "mask.hpp"
+#include <cstdlib>
+#include <iostream>
+#include <variant>
+
+namespace {
+
+bool ck_varlen_bwd_debug_enabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("FLASH_ATTN_CK_BWD_DEBUG");
+        return value != nullptr && std::string(value) != "0";
+    }();
+    return enabled;
+}
+
+void dump_varlen_bwd_debug(const fmha_bwd_traits& traits,
+                           const fmha_bwd_args& args,
+                           const at::Tensor& dq_accum,
+                           bool is_dropout,
+                           bool deterministic) {
+    if(!ck_varlen_bwd_debug_enabled()) {
+        return;
+    }
+
+    const auto nsplits = dq_accum.size(0);
+    const auto total_q = dq_accum.size(1);
+    const auto nhead_q = dq_accum.size(2);
+    const auto hdim_q = dq_accum.size(3);
+    const auto runner_split_stride_dq_acc = total_q * hdim_q;
+    const auto runner_nhead_stride_dq_acc =
+        static_cast<long long>(runner_split_stride_dq_acc) * nsplits;
+
+    std::cerr << "=== DEBUG fmha_bwd varlen call ===\n";
+    std::cerr << "traits:"
+              << " dtype=" << traits.data_type
+              << " group_mode=" << traits.is_group_mode
+              << " mask_type=" << static_cast<int>(traits.mask_type)
+              << " bias_type=" << static_cast<int>(traits.bias_type)
+              << " has_dropout=" << traits.has_dropout
+              << " deterministic=" << traits.is_deterministic
+              << "\n";
+    std::cerr << "runtime:"
+              << " is_dropout=" << is_dropout
+              << " deterministic=" << deterministic
+              << " p_drop=" << args.p_drop
+              << " total_q=" << args.seqlen_q
+              << " total_k=" << args.seqlen_k
+              << " batch=" << args.batch
+              << " max_seqlen_q=" << args.max_seqlen_q
+              << " max_seqlen_k=" << args.max_seqlen_k
+              << " nhead_q=" << args.nhead_q
+              << " nhead_k=" << args.nhead_k
+              << " hdim_q=" << args.hdim_q
+              << " hdim_v=" << args.hdim_v
+              << "\n";
+    std::cerr << "dq_accum tensor:"
+              << " shape=[" << dq_accum.size(0) << ", " << dq_accum.size(1) << ", "
+              << dq_accum.size(2) << ", " << dq_accum.size(3) << "]"
+              << " stride=[" << dq_accum.stride(0) << ", " << dq_accum.stride(1) << ", "
+              << dq_accum.stride(2) << ", " << dq_accum.stride(3) << "]"
+              << "\n";
+    std::cerr << "dq_acc args(actual):"
+              << " split=" << args.split_stride_dq_acc
+              << " batch=" << args.batch_stride_dq_acc
+              << " stride=" << args.stride_dq_acc
+              << " nhead=" << args.nhead_stride_dq_acc
+              << "\n";
+    std::cerr << "dq_acc runner(expected):"
+              << " split=" << runner_split_stride_dq_acc
+              << " batch=0"
+              << " stride=" << hdim_q
+              << " nhead=" << runner_nhead_stride_dq_acc
+              << "\n";
+    std::cerr << "drop_seed_offset variant="
+              << (std::holds_alternative<std::pair<const void*, const void*>>(args.drop_seed_offset)
+                      ? "ptr"
+                      : "value")
+              << " rand_val_ptr=" << args.rand_val_ptr
+              << "\n";
+    std::cerr << "seq pointers:"
+              << " seqstart_q=" << args.seqstart_q_ptr
+              << " seqstart_k=" << args.seqstart_k_ptr
+              << " cu_seqlen_q=" << args.cu_seqlen_q_ptr
+              << " cu_seqlen_k=" << args.cu_seqlen_k_ptr
+              << "\n";
+    std::cerr << "=== END DEBUG ===\n";
+}
+
+} // namespace
 
 fmha_bwd_traits get_ck_fmha_varlen_bwd_traits(const mask_info &mask,
                                               std::string dtype,
@@ -14,16 +102,25 @@ fmha_bwd_traits get_ck_fmha_varlen_bwd_traits(const mask_info &mask,
                                               bool enable_alibi,
                                               bool deterministic)
 {
-    return fmha_bwd_traits{head_size,
-                           head_size,
-                           dtype,
-                           true, // is_group_mode
-                           mask.type,
-                           enable_alibi ? bias_enum::alibi : bias_enum::no_bias,
-                           false,    // has_dbias
-                           has_dropout,
-                           false, // s_randval
-                           deterministic};
+    return fmha_bwd_traits{
+        .seqlen_q = -1,
+        .seqlen_k = -1,
+        .batch = -1,
+        .max_seqlen_q = -1,
+        .max_seqlen_k = -1,
+        .hdim_q = head_size,
+        .hdim_v = head_size,
+        .nhead_q = -1,
+        .nhead_k = -1,
+        .data_type = std::move(dtype),
+        .is_group_mode = true,
+        .mask_type = mask.type,
+        .bias_type = enable_alibi ? bias_enum::alibi : bias_enum::no_bias,
+        .has_dbias = false,
+        .has_dropout = has_dropout,
+        .is_store_randval = false,
+        .is_deterministic = deterministic,
+    };
 }
 
 fmha_bwd_args get_ck_fmha_varlen_bwd_args(const mask_info &mask,
@@ -125,81 +222,90 @@ fmha_bwd_args get_ck_fmha_varlen_bwd_args(const mask_info &mask,
         stride_alibi_slopes = alibi_slopes.dim() == 2 ? alibi_slopes.stride(0) : 0;
     }
 
-    return fmha_bwd_args{q.data_ptr(),
-                         k.data_ptr(),
-                         v.data_ptr(),
-                         alibi_slopes_ptr, // bias
-                         out.data_ptr(),
-                         softmax_lse.data_ptr(),
-                         dout.data_ptr(),
-                         d.data_ptr(),
-                         nullptr, // rand_val
-                         dq.data_ptr(),
-                         dk.data_ptr(),
-                         dv.data_ptr(),
-                         nullptr, // dbias
-                         dq_acc.data_ptr(), // dq_acc
-                         seqlens_q.data_ptr(), // seqstart_q_ptr
-                         seqlens_k.data_ptr(), // seqstart_k_ptr
-                         nullptr, // seqlen_q_ptr
-                         nullptr, // seqlen_k_ptr
-                         nullptr, // cu_seqlen_q_ptr
-                         nullptr, // cu_seqlen_k_ptr
-                         total_q,
-                         total_k,
-                         b,
-                         max_seqlen_q, // max_seqlen_q
-                         max_seqlen_k, // max_seqlen_k
-                         hdim, // hdim_q
-                         hdim, // hdim_v
-                         h, // nhead
-                         h_k, // nhead_k
-                         softmax_scale,
-                         stride_q,
-                         stride_k,
-                         stride_v,
-                         stride_alibi_slopes,
-                         stride_o,
-                         0, // stride_randval
-                         stride_do,
-                         stride_dq_acc,
-                         stride_dq,
-                         stride_dk,
-                         stride_dv,
-                         0, // stride_dbias, FA without bias
-                         nhead_stride_q,
-                         nhead_stride_k,
-                         nhead_stride_v,
-                         0, // nhead_stride_bias, FA without bias
-                         nhead_stride_o,
-                         0, // nhead_stride_randval
-                         nhead_stride_do,
-                         nhead_stride_lse,
-                         nhead_stride_dq_acc,
-                         nhead_stride_dq,
-                         nhead_stride_dk,
-                         nhead_stride_dv,
-                         0, // nhead_stride_dbias, FA without dbias
-                         batch_stride_q,
-                         batch_stride_k,
-                         batch_stride_v,
-                         0  , // batch_stride_bias, FA without bias
-                         batch_stride_o,
-                         0, // batch_stride_randval
-                         batch_stride_do,
-                         batch_stride_lse,
-                         batch_stride_dq_acc,
-                         batch_stride_dq,
-                         batch_stride_dk,
-                         batch_stride_dv,
-                         0  , // batch_stride_dbias, FA without dbias
-                         split_stride_dq_acc,
-                         mask.left,
-                         mask.right,
-                         static_cast<ck_tile::index_t>(mask.type),
-                         p_dropout,
-                         p_undrop,
-                         drop_seed_offset};
+    auto drop_seed_var = std::variant<std::pair<uint64_t, uint64_t>,
+                                      std::pair<const void*, const void*>>{
+        std::pair<uint64_t, uint64_t>{0, 0}};
+    if (drop_seed_offset.first != nullptr && drop_seed_offset.second != nullptr) {
+        drop_seed_var = std::pair<const void*, const void*>{drop_seed_offset.first, drop_seed_offset.second};
+    }
+
+    return fmha_bwd_args{
+        .q_ptr = q.data_ptr(),
+        .k_ptr = k.data_ptr(),
+        .v_ptr = v.data_ptr(),
+        .bias_ptr = alibi_slopes_ptr,
+        .o_ptr = out.data_ptr(),
+        .lse_ptr = softmax_lse.data_ptr(),
+        .do_ptr = dout.data_ptr(),
+        .d_ptr = d.data_ptr(),
+        .rand_val_ptr = nullptr,
+        .dq_ptr = dq.data_ptr(),
+        .dk_ptr = dk.data_ptr(),
+        .dv_ptr = dv.data_ptr(),
+        .dbias_ptr = nullptr,
+        .dq_acc_ptr = dq_acc.data_ptr(),
+        .seqstart_q_ptr = seqlens_q.data_ptr(),
+        .seqstart_k_ptr = seqlens_k.data_ptr(),
+        .seqlen_q_ptr = nullptr,
+        .seqlen_k_ptr = nullptr,
+        .cu_seqlen_q_ptr = nullptr,
+        .cu_seqlen_k_ptr = nullptr,
+        .seqlen_q = total_q,
+        .seqlen_k = total_k,
+        .batch = b,
+        .max_seqlen_q = max_seqlen_q,
+        .max_seqlen_k = max_seqlen_k,
+        .hdim_q = hdim,
+        .hdim_v = hdim,
+        .nhead_q = h,
+        .nhead_k = h_k,
+        .scale = softmax_scale,
+        .stride_q = stride_q,
+        .stride_k = stride_k,
+        .stride_v = stride_v,
+        .stride_bias = stride_alibi_slopes,
+        .stride_o = stride_o,
+        .stride_randval = 0,
+        .stride_do = stride_do,
+        .stride_dq_acc = stride_dq_acc,
+        .stride_dq = stride_dq,
+        .stride_dk = stride_dk,
+        .stride_dv = stride_dv,
+        .stride_dbias = 0,
+        .nhead_stride_q = nhead_stride_q,
+        .nhead_stride_k = nhead_stride_k,
+        .nhead_stride_v = nhead_stride_v,
+        .nhead_stride_bias = 0,
+        .nhead_stride_o = nhead_stride_o,
+        .nhead_stride_randval = 0,
+        .nhead_stride_do = nhead_stride_do,
+        .nhead_stride_lsed = nhead_stride_lse,
+        .nhead_stride_dq_acc = nhead_stride_dq_acc,
+        .nhead_stride_dq = nhead_stride_dq,
+        .nhead_stride_dk = nhead_stride_dk,
+        .nhead_stride_dv = nhead_stride_dv,
+        .nhead_stride_dbias = 0,
+        .batch_stride_q = batch_stride_q,
+        .batch_stride_k = batch_stride_k,
+        .batch_stride_v = batch_stride_v,
+        .batch_stride_bias = 0,
+        .batch_stride_o = batch_stride_o,
+        .batch_stride_randval = 0,
+        .batch_stride_do = batch_stride_do,
+        .batch_stride_lsed = batch_stride_lse,
+        .batch_stride_dq_acc = batch_stride_dq_acc,
+        .batch_stride_dq = batch_stride_dq,
+        .batch_stride_dk = batch_stride_dk,
+        .batch_stride_dv = batch_stride_dv,
+        .batch_stride_dbias = 0,
+        .split_stride_dq_acc = split_stride_dq_acc,
+        .window_size_left = mask.left,
+        .window_size_right = mask.right,
+        .mask_type = static_cast<ck_tile::index_t>(mask.type),
+        .p_drop = p_dropout,
+        .p_undrop = p_undrop,
+        .drop_seed_offset = std::move(drop_seed_var),
+    };
 }
 
 std::vector<at::Tensor>
@@ -414,6 +520,8 @@ mha_varlen_bwd(const at::Tensor &dout,                   // total_q x num_heads 
                 softmax_scale,
                 p_dropout,
                 drop_seed_offset);
+
+        dump_varlen_bwd_debug(traits, args, dq_accum, is_dropout, deterministic);
 
         float t = fmha_bwd(traits, args, stream_config);
         TORCH_CHECK(t >= 0, "invalid argument for fmha_bwd");
