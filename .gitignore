@@ -34,3 +34,10 @@ venv
 
 # compile-time generated file
 flash_attn_config.py
+csrc/flash_attn_ck/*.cu
+csrc/flash_attn_ck/*.hip
+csrc/flash_attn_ck/flash_common_hip.hpp
+csrc/flash_attn_ck/ck_build_config.hpp
+build.log
+rebuild.log
+rebuild_debug.log

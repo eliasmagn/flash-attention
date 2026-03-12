@@ -4,6 +4,7 @@
 
 #include "flash_common.hpp"
 
+#include "ck_build_config.hpp"
 #include "fmha_fwd.hpp"
 #include "mask.hpp"
 #include <variant>
