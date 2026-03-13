@@ -122,11 +122,11 @@ fmha_bwd_args get_ck_fmha_bwd_args(const mask_info &mask,
     ck_tile::index_t stride_dv = dv.stride(1);
     ck_tile::index_t nhead_stride_dv = dv.stride(2);
 
-    // dq_acc: (batch_size, nheads, split, seqlen_q, hdim)
-    ck_tile::index_t batch_stride_dq_acc = dq_acc.stride(0);
-    ck_tile::index_t nhead_stride_dq_acc = dq_acc.stride(1);
-    ck_tile::index_t split_stride_dq_acc = dq_acc.stride(2);
-    ck_tile::index_t stride_dq_acc = dq_acc.stride(3);
+    // dq_acc: (split, batch_size, seqlen_q, nheads, hdim)
+    ck_tile::index_t split_stride_dq_acc = dq_acc.stride(0);
+    ck_tile::index_t batch_stride_dq_acc = dq_acc.stride(1);
+    ck_tile::index_t stride_dq_acc = dq_acc.stride(2);
+    ck_tile::index_t nhead_stride_dq_acc = dq_acc.stride(3);
 
     float p_undrop = 1.0 - p_dropout;
 
