@@ -447,11 +447,11 @@ mha_varlen_bwd(const at::Tensor &dout,                   // total_q x num_heads 
     at::Tensor dq_accum;
 
     if (!deterministic) {
-        dq_accum = torch::zeros({1, total_q, num_heads, head_size}, opts.dtype(at::kFloat));
+        dq_accum = torch::zeros({num_heads, 1, total_q, head_size}, opts.dtype(at::kFloat));
     } else {
         const ck_tile::index_t kN0 = head_size <= 128 ? 128 : 64;
         const ck_tile::index_t nsplits = ck_tile::integer_divide_ceil(max_seqlen_k, kN0);
-        dq_accum = torch::zeros({nsplits, total_q, num_heads, head_size}, opts.dtype(at::kFloat));
+        dq_accum = torch::zeros({num_heads, nsplits, total_q, head_size}, opts.dtype(at::kFloat));
     }
 
     at::Tensor dk_expanded, dv_expanded;
@@ -491,8 +491,11 @@ mha_varlen_bwd(const at::Tensor &dout,                   // total_q x num_heads 
     }
 
     if (max_seqlen_q > 0) {
-        auto rng_state_ptr = reinterpret_cast<uint64_t*>(rng_state.data_ptr());
-        auto drop_seed_offset = std::make_pair(rng_state_ptr, rng_state_ptr + 1);
+        std::pair<uint64_t*, uint64_t*> drop_seed_offset = {nullptr, nullptr};
+        if (is_dropout) {
+            auto rng_state_ptr = reinterpret_cast<uint64_t*>(rng_state.data_ptr());
+            drop_seed_offset = std::make_pair(rng_state_ptr, rng_state_ptr + 1);
+        }
         ck_tile::stream_config stream_config{stream};
 
         auto traits =
