@@ -11,6 +11,13 @@
 
 fmha_bwd_traits get_ck_fmha_varlen_bwd_traits(const mask_info &mask,
                                               std::string dtype,
+                                              int seqlen_q,
+                                              int seqlen_k,
+                                              int batch,
+                                              int max_seqlen_q,
+                                              int max_seqlen_k,
+                                              int num_heads,
+                                              int num_heads_k,
                                               int head_size,
                                               bool has_dropout,
                                               bool enable_alibi,
@@ -18,15 +25,15 @@ fmha_bwd_traits get_ck_fmha_varlen_bwd_traits(const mask_info &mask,
 {
 #if FLASHATTN_CK_USE_CURRENT_API
     return fmha_bwd_traits{
-        .seqlen_q = -1,
-        .seqlen_k = -1,
-        .batch = -1,
-        .max_seqlen_q = -1,
-        .max_seqlen_k = -1,
+        .seqlen_q = seqlen_q,
+        .seqlen_k = seqlen_k,
+        .batch = batch,
+        .max_seqlen_q = max_seqlen_q,
+        .max_seqlen_k = max_seqlen_k,
         .hdim_q = head_size,
         .hdim_v = head_size,
-        .nhead_q = -1,
-        .nhead_k = -1,
+        .nhead_q = num_heads,
+        .nhead_k = num_heads_k,
         .data_type = std::move(dtype),
         .is_group_mode = true,
         .mask_type = mask.type,
@@ -499,7 +506,19 @@ mha_varlen_bwd(const at::Tensor &dout,                   // total_q x num_heads 
         ck_tile::stream_config stream_config{stream};
 
         auto traits =
-            get_ck_fmha_varlen_bwd_traits(mask, q_dtype_str, head_size, is_dropout, alibi_slopes_.has_value(), deterministic);
+            get_ck_fmha_varlen_bwd_traits(mask,
+                                          q_dtype_str,
+                                          q.size(0),
+                                          k.size(0),
+                                          batch_size,
+                                          max_seqlen_q,
+                                          max_seqlen_k,
+                                          num_heads,
+                                          num_heads_k,
+                                          head_size,
+                                          is_dropout,
+                                          alibi_slopes_.has_value(),
+                                          deterministic);
 
         auto args =
             get_ck_fmha_varlen_bwd_args(
