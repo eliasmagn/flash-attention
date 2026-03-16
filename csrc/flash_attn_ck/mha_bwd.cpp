@@ -7,6 +7,7 @@
 #include "ck_build_config.hpp"
 #include "fmha_bwd.hpp"
 #include "mask.hpp"
+#include <iostream>
 #include <variant>
 
 fmha_bwd_traits get_ck_fmha_bwd_traits(const mask_info &mask,
@@ -518,7 +519,21 @@ mha_bwd(const at::Tensor &dout,                   // batch_size x seqlen_q x num
                 p_dropout,
                 drop_seed_offset);
 
+        std::cerr << "[fa_ck_bwd] mode=batch"
+                  << " dtype=" << q_dtype_str
+                  << " seqlen_q=" << seqlen_q
+                  << " seqlen_k=" << seqlen_k
+                  << " h=" << num_heads
+                  << " h_k=" << num_heads_k
+                  << " d=" << head_size
+                  << " dropout=" << (is_dropout ? 1 : 0)
+                  << " deterministic=" << (deterministic ? 1 : 0)
+                  << " mask=" << static_cast<int>(mask.type)
+                  << std::endl;
         float t = fmha_bwd(traits, args, stream_config);
+        std::cerr << "[fa_ck_bwd] mode=batch"
+                  << " t=" << t
+                  << std::endl;
         TORCH_CHECK(t >= 0, "invalid argument for fmha_bwd");
     } else {
         // If seqlen_q == 0, then we have an empty tensor. We need to set the output to 0.
