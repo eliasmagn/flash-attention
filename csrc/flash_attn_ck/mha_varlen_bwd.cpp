@@ -9,6 +9,7 @@
 #include "mask.hpp"
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <variant>
 
 fmha_bwd_traits get_ck_fmha_varlen_bwd_traits(const mask_info &mask,
@@ -551,6 +552,18 @@ mha_varlen_bwd(const at::Tensor &dout,                   // total_q x num_heads 
                 p_dropout,
                 drop_seed_offset);
 
+        auto tensor_summary = [](const char* name, const at::Tensor& t) {
+            auto t_float = t.to(at::kFloat);
+            std::ostringstream os;
+            os << name
+               << " shape=" << t.sizes()
+               << " stride=" << t.strides()
+               << " finite=" << (at::isfinite(t_float).all().item<bool>() ? 1 : 0)
+               << " min=" << t_float.min().item<float>()
+               << " max=" << t_float.max().item<float>()
+               << " mean=" << t_float.mean().item<float>();
+            return os.str();
+        };
         std::cerr << "[fa_ck_bwd] mode=group"
                   << " dtype=" << q_dtype_str
                   << " total_q=" << q.size(0)
@@ -565,6 +578,9 @@ mha_varlen_bwd(const at::Tensor &dout,                   // total_q x num_heads 
                   << " deterministic=" << (deterministic ? 1 : 0)
                   << " mask=" << static_cast<int>(mask.type)
                   << std::endl;
+        std::cerr << "[fa_ck_contract] mode=group " << tensor_summary("out", out) << std::endl;
+        std::cerr << "[fa_ck_contract] mode=group " << tensor_summary("softmax_lse", softmax_lse) << std::endl;
+        std::cerr << "[fa_ck_contract] mode=group " << tensor_summary("dout", dout) << std::endl;
         float t = fmha_bwd(traits, args, stream_config);
         std::cerr << "[fa_ck_bwd] mode=group"
                   << " t=" << t
