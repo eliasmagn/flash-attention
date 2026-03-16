@@ -7,6 +7,7 @@
 #include "ck_build_config.hpp"
 #include "fmha_bwd.hpp"
 #include "mask.hpp"
+#include <cstdlib>
 #include <iostream>
 #include <variant>
 
@@ -504,7 +505,9 @@ mha_varlen_bwd(const at::Tensor &dout,                   // total_q x num_heads 
             auto rng_state_ptr = reinterpret_cast<uint64_t*>(rng_state.data_ptr());
             drop_seed_offset = std::make_pair(rng_state_ptr, rng_state_ptr + 1);
         }
-        ck_tile::stream_config stream_config{stream};
+        const char* ck_log_level_env = std::getenv("FLASHATTN_CK_LOG_LEVEL");
+        int ck_log_level = ck_log_level_env != nullptr ? std::atoi(ck_log_level_env) : 0;
+        ck_tile::stream_config stream_config{stream, false, ck_log_level};
 
         auto traits =
             get_ck_fmha_varlen_bwd_traits(mask,
